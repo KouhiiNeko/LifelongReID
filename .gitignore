@@ -1,0 +1,13 @@
+# 训练结果、日志、模型
+results/
+logs/
+runs/
+output/
+checkpoints/
+
+*.pth
+*.pt
+*.pkl
+
+# VSCode 配置（可选）
+.vscode/

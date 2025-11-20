@@ -1,0 +1,8 @@
+Metadata-Version: 2.1
+Name: lreid
+Version: 1.0.0
+Summary: A library for Lifelong Person Re-Identification in PyTorch
+Author: Nan Pu
+License: MIT
+Keywords: Person Re-Identification,Deep Learning,Computer Vision
+License-File: LICENSE
