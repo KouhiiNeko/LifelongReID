@@ -329,10 +329,42 @@ def ResNet50(flatten=True):
 def ResNet101(flatten=True):
     return ResNet(BottleneckBlock, [3,4,23,3],[256,512,1024,2048], flatten)
 
+# ==========================================
+#  添加vit
+# ==========================================
+
+class ViTBase(nn.Module):
+    def __init__(self, flatten=True):
+        super(ViTBase, self).__init__()
+        try:
+            import timm
+        except ImportError:
+            print("Error: Please install timm via 'pip install timm==0.6.13'")
+            
+        # 加载预训练的 ViT-Base
+        # img_size=(256, 128) 告诉 timm 自动调整位置编码(Positional Embeddings)来适应 ReID 的长方形图片
+        # num_classes=0 表示移除分类头，直接输出特征
+        self.model = timm.create_model('vit_base_patch16_224', pretrained=True, num_classes=0, img_size=(256, 128))
+        
+        # ViT-Base 的输出特征维度是 768
+        self.final_feat_dim = 768
+        self.flatten = flatten
+
+    def forward(self, x):
+        # x shape: [Batch, 3, 256, 128]
+        # timm 的 forward_features 或直接 call model 都可以
+        feat = self.model(x) 
+        return feat
+
+# ==========================================
+#  👆 添加结束
+# ==========================================
+
 model_dict = dict(Conv4 = Conv4,
                   Conv6 = Conv6,
                   ResNet10 = ResNet10,
                   ResNet18 = ResNet18,
                   ResNet34 = ResNet34,
                   ResNet50 = ResNet50,
-                  ResNet101 = ResNet101)
+                  ResNet101 = ResNet101,
+                  vit_base = ViTBase)  # <--- 新增这一行，注意逗号
