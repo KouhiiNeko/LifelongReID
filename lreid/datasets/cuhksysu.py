@@ -96,7 +96,8 @@ class IncrementalSamples4cuhksysu(IncrementalPersonReIDSamples):
                     one_img = Image.open(image_path)
                     one_img_copy = copy.deepcopy(one_img)
                     box_tuple = tuple(box.round())
-                    box_tuple = map(int, box_tuple)
+                   # box_tuple = map(int, box_tuple)<--- 这里的 map 返回迭代器，导致报错
+                    box_tuple = tuple(map(int, box_tuple))  # <--- 加上 tuple() 转换
                     filled_pid = str(pid).zfill(5)
                     is_hard = str(is_hard)
                     cropped = one_img_copy.crop(box_tuple)
@@ -304,7 +305,7 @@ class IncrementalSamples4subcuhksysu(IncrementalPersonReIDSamples):
                     one_img = Image.open(image_path)
                     one_img_copy = copy.deepcopy(one_img)
                     box_tuple = tuple(box.round())
-                    box_tuple = map(int, box_tuple)
+                    box_tuple = tuple(map(int, box_tuple))  # <--- 加上 tuple() 转换
                     filled_pid = str(pid).zfill(5)
                     is_hard = str(is_hard)
                     cropped = one_img_copy.crop(box_tuple)
@@ -491,7 +492,7 @@ class CUHKSYSU(ImageDataset):
                     one_img = Image.open(image_path)
                     one_img_copy = copy.deepcopy(one_img)
                     box_tuple = tuple(box.round())
-                    box_tuple = map(int, box_tuple)
+                    box_tuple = tuple(map(int, box_tuple))  # <--- 加上 tuple() 转换
                     filled_pid = str(pid).zfill(5)
                     is_hard = str(is_hard)
                     cropped = one_img_copy.crop(box_tuple)

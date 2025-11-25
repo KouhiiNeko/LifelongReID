@@ -150,10 +150,10 @@ if __name__ == '__main__':
     # parser.add_argument('--train_dataset', nargs='+', type=str,
     #                     default=['market', 'duke', 'cuhksysu', 'subcuhksysu', 'msmt17', 'cuhk03','mix','sensereid',
     #                              'cuhk01','cuhk02','viper','ilids','prid','grid'])
-    # parser.add_argument('--train_dataset', nargs='+', type=str,
-    #                     default=['market','subcuhksysu','duke','msmt17','cuhk03'])
     parser.add_argument('--train_dataset', nargs='+', type=str,
-                        default=['market']) # 先只跑 Market 试试水
+                        default=['market','subcuhksysu','duke','msmt17','cuhk03'])
+    # parser.add_argument('--train_dataset', nargs='+', type=str,
+    #                     default=['market']) # 先只跑 Market 试试水
     # parser.add_argument('--test_dataset', nargs='+', type=str,
     #                     default=['market','duke','cuhk03','allgeneralizable','cuhk01','cuhk02','viper','ilids','prid','grid','sensereid'])
     parser.add_argument('--test_dataset', nargs='+', type=str,

@@ -4,7 +4,8 @@ from collections import defaultdict
 
 try:
     from lreid.evaluation.rank_cylib.rank_cy import evaluate_cy
-    IS_CYTHON_AVAI = True
+    # IS_CYTHON_AVAI = True  <-- 注释掉这行
+    IS_CYTHON_AVAI = False # <-- 强制设为 False，使用 Python 代码
 except ImportError:
     IS_CYTHON_AVAI = False
     warnings.warn(
@@ -42,9 +43,19 @@ def eval_cuhk03(distmat, q_pids, g_pids, q_camids, g_camids, max_rank):
         q_camid = q_camids[q_idx]
 
         # remove gallery samples that have the same pid and camid with query
+        # order = indices[q_idx]
+        # remove = (g_pids[order] == q_pid) & (g_camids[order] == q_camid)
+        # keep = np.invert(remove)
         order = indices[q_idx]
-        remove = (g_pids[order] == q_pid) & (g_camids[order] == q_camid)
-        keep = np.invert(remove)
+        
+        # [Fix] Check if it is a single-camera dataset (like SubCUHKSYSU)
+        if len(np.unique(np.concatenate((q_camids, g_camids)))) <= 1:
+            # 如果只有一个摄像头，保留所有样本（不进行剔除）
+            keep = np.ones(len(order), dtype=bool)
+        else:
+            # 正常 ReID 逻辑：剔除同摄像头同 ID 的样本
+            remove = (g_pids[order] == q_pid) & (g_camids[order] == q_camid)
+            keep = np.invert(remove)
 
         # compute cmc curve
         raw_cmc = matches[q_idx][
@@ -111,6 +122,10 @@ def eval_market1501(distmat, q_pids, g_pids, q_camids, g_camids, max_rank):
     all_AP = []
     num_valid_q = 0. # number of valid query
 
+    # [Fix] 检测是否为单摄像头数据集 (如 SubCUHKSYSU)
+    # 如果所有 query 和 gallery 都在同一个摄像头下，就不进行剔除
+    is_single_camera = len(np.unique(np.concatenate((q_camids, g_camids)))) <= 1
+
     for q_idx in range(num_q):
         # get query pid and camid
         q_pid = q_pids[q_idx]
@@ -118,8 +133,14 @@ def eval_market1501(distmat, q_pids, g_pids, q_camids, g_camids, max_rank):
 
         # remove gallery samples that have the same pid and camid with query
         order = indices[q_idx]
-        remove = (g_pids[order] == q_pid) & (g_camids[order] == q_camid)
-        keep = np.invert(remove)
+        
+        if is_single_camera:
+            # 单摄像头模式：保留所有样本 (keep all)
+            keep = np.ones(len(order), dtype=bool)
+        else:
+            # 标准模式：剔除同摄像头同ID样本
+            remove = (g_pids[order] == q_pid) & (g_camids[order] == q_camid)
+            keep = np.invert(remove)
 
         # compute cmc curve
         raw_cmc = matches[q_idx][
