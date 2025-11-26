@@ -126,7 +126,8 @@ if __name__ == '__main__':
 
     parser.add_argument('--fp_16', type=bool, default=False)
     parser.add_argument('--running_time', type=str, default=running_time)
-    parser.add_argument('--visualize_train_by_visdom', type=bool, default=False)# 此处把True改为了false
+    # 强制改为 False，并使用 ast.literal_eval 解析参数（这样 "False" 才会变成 False）
+    parser.add_argument('--visualize_train_by_visdom', type=ast.literal_eval, default=False)# 此处把True改为了false
     parser.add_argument('--cuda', type=str, default='cuda')
     parser.add_argument('--mode', type=str, default='train', help='trian_10, train_5, train, test or visualize')
     parser.add_argument('--output_path', type=str, default=f'results/{running_time}', help='path to save related informations')
