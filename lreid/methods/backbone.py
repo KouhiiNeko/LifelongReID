@@ -330,32 +330,211 @@ def ResNet101(flatten=True):
     return ResNet(BottleneckBlock, [3,4,23,3],[256,512,1024,2048], flatten)
 
 # ==========================================
-#  添加vit
+# 👇 升级版 ViTBase (支持更换模型架构)
 # ==========================================
 
 class ViTBase(nn.Module):
-    def __init__(self, flatten=True):
+    def __init__(self, model_name='vit_base_patch16_224', flatten=True):
         super(ViTBase, self).__init__()
         try:
             import timm
         except ImportError:
-            print("Error: Please install timm via 'pip install timm==0.6.13'")
+            print("Error: Please install timm")
             
-        # 加载预训练的 ViT-Base
-        # img_size=(256, 128) 告诉 timm 自动调整位置编码(Positional Embeddings)来适应 ReID 的长方形图片
-        # num_classes=0 表示移除分类头，直接输出特征
-        self.model = timm.create_model('vit_base_patch16_224', pretrained=True, num_classes=0, img_size=(256, 128))
+        print(f"****** Building ViT Backbone: {model_name} ******")
         
-        # ViT-Base 的输出特征维度是 768
-        self.final_feat_dim = 768
+        # 动态创建模型
+        self.model = timm.create_model(model_name, pretrained=True, num_classes=0, img_size=(256, 128), drop_path_rate=0.1)
+        
+        # 自动获取输出维度 (不用手动写 768 了)
+        self.final_feat_dim = self.model.num_features
         self.flatten = flatten
 
     def forward(self, x):
-        # x shape: [Batch, 3, 256, 128]
-        # timm 的 forward_features 或直接 call model 都可以
         feat = self.model(x) 
         return feat
 
+# ==========================================
+#  👆 添加结束
+# ==========================================
+
+# ==========================================
+#  添加sdlara
+# ==========================================
+class SDLoRALinear(nn.Module):
+    def __init__(self, original_linear, r=10):
+        """
+        SD-LoRA Linear Layer
+        Args:
+            original_linear: The frozen pre-trained linear layer
+            r: Rank (paper uses r=10 for ViT-B/16)
+        """
+        super(SDLoRALinear, self).__init__()
+        self.in_features = original_linear.in_features
+        self.out_features = original_linear.out_features
+        self.r = r
+
+        # 1. 冻结原始权重 (W0)
+        self.weight = original_linear.weight
+        self.bias = original_linear.bias
+        self.weight.requires_grad = False
+        if self.bias is not None:
+            self.bias.requires_grad = False
+
+        # 2. 存储旧任务的“方向” (Frozen Directions)
+        # 我们不存储巨大的 W 矩阵，而是存储 A 和 B，计算时再恢复方向
+        # list of (A, B) tuples
+        self.past_directions = nn.ModuleList() 
+        
+        # 3. 存储所有任务的“幅度” (Trainable Magnitudes)
+        # alpha_k in Eq. (4). All alphas are trainable end-to-end.
+        self.alphas = nn.ParameterList()
+
+        # 4. 当前任务的 A 和 B (Trainable Direction)
+        self.current_A = None
+        self.current_B = None
+        
+        # 初始化第一个任务
+        self.new_task()
+
+    def new_task(self):
+        """
+        Start a new task:
+        1. If there was a current task, freeze its direction and move to past_directions.
+        2. Initialize new trainable A and B for the new task.
+        3. Initialize new trainable alpha.
+        """
+        device = self.weight.device
+        
+        # --- Step A: Archive previous task (if exists) ---
+        if self.current_A is not None:
+            # 冻结当前方向
+            self.current_A.requires_grad = False
+            self.current_B.requires_grad = False
+            
+            # 存入历史列表 (作为 Module 注册，保证 device 同步)
+            # 我们封装进一个 ModuleList 里的 Module 方便管理
+            past_pair = nn.Module()
+            past_pair.register_buffer('A', self.current_A.data.clone())
+            past_pair.register_buffer('B', self.current_B.data.clone())
+            self.past_directions.append(past_pair)
+
+        # --- Step B: Create new task parameters ---
+        # Initialize A, B (Direction)
+        # Paper Section 3.4: "entries of A0 and B0 are i.i.d. according to N(0, sigma_1)"
+        # Standard LoRA init: A=Kaiming, B=0. 
+        # SD-LoRA requires non-zero start to have a direction? 
+        # Let's stick to standard LoRA init first to be safe, or small random.
+        new_A = nn.Parameter(torch.randn(self.in_features, self.r).to(device) * 0.01) # Small random
+        new_B = nn.Parameter(torch.zeros(self.r, self.out_features).to(device))       # Zero init
+        
+        self.current_A = new_A
+        self.current_B = new_B
+        
+        # Initialize Alpha (Magnitude)
+        # Paper Section 3.3: "learned magnitudes, all initialized to ones"
+        new_alpha = nn.Parameter(torch.tensor(1.0).to(device))
+        self.alphas.append(new_alpha)
+
+    def get_normalized_update(self, A, B):
+        """
+        Compute Normalized Direction: \bar{AB} = AB / ||AB||_F
+        """
+        # AB shape: [in, r] x [r, out] -> [in, out]
+        # 注意：Linear 层的 weight 通常是 [out, in]，这里我们需要根据 pytorch 习惯调整转置
+        # PyTorch F.linear(x, W) computes xW^T + b. 
+        # So if we want AB to be added to W^T, A should be [in, r], B should be [r, out].
+        
+        delta_W = A @ B # [in, out]
+        norm = torch.norm(delta_W, p='fro') + 1e-6
+        return delta_W / norm
+
+    def forward(self, x):
+        # 1. 基础输出 W0 * x
+        out = F.linear(x, self.weight, self.bias)
+        
+        # 2. 加上旧任务的贡献 (alpha_k * dir_k * x)
+        # Eq. (4): sum( alpha_k * normalized(A_k B_k) )
+        for i, past_pair in enumerate(self.past_directions):
+            alpha = self.alphas[i]
+            norm_dir = self.get_normalized_update(past_pair.A, past_pair.B)
+            # x: [batch, in], norm_dir: [in, out]
+            out += alpha * (x @ norm_dir)
+
+        # 3. 加上当前任务的贡献
+        if self.current_A is not None:
+            current_alpha = self.alphas[-1]
+            norm_dir = self.get_normalized_update(self.current_A, self.current_B)
+            out += current_alpha * (x @ norm_dir)
+            
+        return out
+
+class ViTSDLora(nn.Module):
+    def __init__(self, model_name='vit_base_patch16_224', flatten=True, r=10):
+        super(ViTSDLora, self).__init__()
+        try:
+            import timm
+        except ImportError:
+            print("Error: Please install timm")
+            
+        print(f"****** Building SD-LoRA ViT: {model_name} (r={r}) ******")
+        # 1. 加载预训练 ViT
+        self.model = timm.create_model(model_name, pretrained=True, num_classes=0, img_size=(256, 128), drop_path_rate=0.1)
+        self.final_feat_dim = self.model.num_features
+        self.flatten = flatten
+        self.r = r
+
+        # 2. 注入 SD-LoRA 层
+        # Paper Section 4.1: "components are inserted into the attention layers... modifying query and value projections"
+        self.inject_sd_lora(self.model)
+        
+        self.count_parameters()
+
+    def inject_sd_lora(self, model):
+        self.lora_layers = [] # Keep track to update tasks later
+        for i, block in enumerate(model.blocks):
+            # 替换 Query 和 Value
+            # timm 的 qkv 是一个 Linear 层，我们需要拆解它或者 wrap 它
+            # timm implement qkv as one layer: nn.Linear(dim, dim * 3)
+            # 这比较麻烦，我们需要 tricky 一点：
+            # 方案：只替换 qkv 层
+            
+            if hasattr(block.attn, 'qkv'):
+                # Original qkv
+                org_qkv = block.attn.qkv
+                # SD-LoRA wrapper
+                # 注意：qkv 是 [dim, dim*3]，我们这里简单起见，对整个 qkv 矩阵做 LoRA
+                # 也就是 rank 作用于 dim*3。这也符合 SD-LoRA 的通用性。
+                block.attn.qkv = SDLoRALinear(org_qkv, r=self.r)
+                self.lora_layers.append(block.attn.qkv)
+                
+            # 如果你想严格复现论文 "query and value projections"，
+            # 由于 timm 合并了 qkv，我们需要自己重写 Attention forward，或者接受对 qkv 同时做 LoRA。
+            # 鉴于工程复杂度，对整个 qkv 做 LoRA 是最快且有效的近似。
+
+    def new_task(self):
+        """
+        通知所有 LoRA 层：开始新任务了！
+        冻结当前 params，分配新 params。
+        """
+        print("==> SD-LoRA: Switching to New Task mode...")
+        for layer in self.lora_layers:
+            layer.new_task()
+        self.count_parameters()
+
+    def count_parameters(self):
+        trainable_params = 0
+        all_param = 0
+        for name, param in self.named_parameters():
+            all_param += param.numel()
+            if param.requires_grad:
+                trainable_params += param.numel()
+        print(f"Total params: {all_param / 1e6:.2f}M")
+        print(f"Trainable params: {trainable_params / 1e6:.2f}M")
+        print(f"Ratio: {trainable_params / all_param * 100:.2f}%")
+
+    def forward(self, x):
+        return self.model(x)
 # ==========================================
 #  👆 添加结束
 # ==========================================
@@ -367,4 +546,11 @@ model_dict = dict(Conv4 = Conv4,
                   ResNet34 = ResNet34,
                   ResNet50 = ResNet50,
                   ResNet101 = ResNet101,
-                  vit_base = ViTBase)  # <--- 新增这一行，注意逗号
+                  # 注册不同的 ViT 配置
+                  vit_base = lambda flatten: ViTBase('vit_base_patch16_224', flatten),   # 经典款
+                  # 👇 新增 SD-LoRA
+                  vit_sd_lora = lambda flatten: ViTSDLora('vit_base_patch16_224', flatten, r=10),
+                  vit_small = lambda flatten: ViTBase('vit_small_patch16_224', flatten), # 轻量款 (老师可能想看这个)
+                  deit_base = lambda flatten: ViTBase('deit_base_patch16_224', flatten), # 蒸馏版 (效果通常更好)
+                  swin_base = lambda flatten: ViTBase('swin_base_patch4_window7_224', flatten) # Swin Transformer (SOTA 级)
+)

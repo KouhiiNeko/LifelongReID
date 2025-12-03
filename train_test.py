@@ -29,7 +29,43 @@ def main(config):
         if config.auto_resume_training_from_lastest_steps:
             start_train_step, start_train_epoch = base.resume_last_model()
         # continual loop
+        # for current_step in range(start_train_step, loaders.total_step):
         for current_step in range(start_train_step, loaders.total_step):
+            
+            current_total_train_epochs = config.total_continual_train_epochs if current_step > 0 else config.total_train_epochs
+            
+            # 1. 先处理旧模型归档 (这是原本代码的位置，我们利用它)
+            if current_step > 0:
+                logger(f'save_and_frozen old model in {current_step}')
+                old_model = base.copy_model_and_frozen(model_name='tasknet')
+                0
+                
+                # [Fix 1] 强制冻结 old_model 的所有参数，防止占用显存构建计算图
+                for param in old_model.parameters():
+                    param.requires_grad = False
+                old_model.eval() # 设为 eval 模式更稳妥
+                
+                old_graph_model = base.copy_model_and_frozen(model_name='metagraph')
+                for param in old_graph_model.parameters():
+                    param.requires_grad = False
+            else:
+                old_model = None
+                old_graph_model = None
+
+            # 2. [SD-LoRA Hook] 再进行新任务扩展 (Fix 2: 移到 copy 之后)
+            # 这样 old_model 就是纯粹的旧参数，不包含新任务的随机初始化
+            if current_step > 0 and hasattr(base.model_dict['tasknet'], 'new_task'):
+                 logger(f"****** SD-LoRA: Initializing params for Task {current_step} ******")
+                 
+                 # A. 扩展网络结构
+                 base.model_dict['tasknet'].new_task()
+                 
+                 # B. 重置优化器 (捕获新参数)
+                 base.model_dict['tasknet'].to(base.device)
+                 base._init_optimizer() 
+                 
+                 logger(f"==> SD-LoRA: Optimizer reset. Ready for Step {current_step}.")
+            # ____________________________________________________________        
         # for current_step in range(2, loaders.total_step):
             current_total_train_epochs = config.total_continual_train_epochs if current_step > 0 else config.total_train_epochs
             if current_step > 0:
