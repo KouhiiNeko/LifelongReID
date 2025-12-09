@@ -92,11 +92,11 @@ class Base_metagraph_p_s(object):
         self.model_dict['tasknet'] = LwFNet(class_num_list=num_class_list,
                                             pretrained=pretrained)
 
-        self.model_dict['metagraph'] = MetaGraph_fd(hidden_dim=self.model_dict['tasknet'].feature_dim,
-                                                 input_dim=self.model_dict['tasknet'].feature_dim,
-                                                 sigma=2.0,
-                                                 proto_graph_vertex_num=self.config.p,
-                                                 meta_graph_vertex_num=self.config.meta_graph_vertex_num)
+        # self.model_dict['metagraph'] = MetaGraph_fd(hidden_dim=self.model_dict['tasknet'].feature_dim,
+        #                                          input_dim=self.model_dict['tasknet'].feature_dim,
+        #                                          sigma=2.0,
+        #                                          proto_graph_vertex_num=self.config.p,
+        #                                          meta_graph_vertex_num=self.config.meta_graph_vertex_num)  此处有修改--注释掉了代码
 
 
         for name, module in self.model_dict.items():

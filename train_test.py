@@ -44,10 +44,14 @@ def main(config):
                 for param in old_model.parameters():
                     param.requires_grad = False
                 old_model.eval() # 设为 eval 模式更稳妥
-                
-                old_graph_model = base.copy_model_and_frozen(model_name='metagraph')
-                for param in old_graph_model.parameters():
-                    param.requires_grad = False
+
+                # [SD-LoRA Pure Mode] 物理切除 MetaGraph 修改
+                # old_graph_model = base.copy_model_and_frozen(model_name='metagraph')
+                old_graph_model = None  # 直接设为 None，防止报错
+                # [Fix] 加个判断：只有不为 None 才去冻结
+                if old_graph_model is not None:
+                    for param in old_graph_model.parameters():
+                        param.requires_grad = False
             else:
                 old_model = None
                 old_graph_model = None
@@ -71,7 +75,8 @@ def main(config):
             if current_step > 0:
                 logger(f'save_and_frozen old model in {current_step}')
                 old_model = base.copy_model_and_frozen(model_name='tasknet')
-                old_graph_model = base.copy_model_and_frozen(model_name='metagraph')
+                # old_graph_model = base.copy_model_and_frozen(model_name='metagraph')
+                old_graph_model = None
             else:
                 old_model = None
                 old_graph_model = None

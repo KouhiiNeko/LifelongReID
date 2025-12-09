@@ -6,10 +6,16 @@ from lreid.evaluation import accuracy
 def train_p_s_an_epoch(config, base, loader, current_step, old_model, old_graph_model, current_epoch=None, output_featuremaps=True):
     base.set_all_model_train()
     meter = MultiItemAverageMeter()
+    
+    # [Log Info]
     if old_model is None:
         print('****** training tasknet ******\n')
     else:
-        print('****** training both tasknet and metagraph ******\n')
+        if 'metagraph' in base.model_dict:
+            print('****** training both tasknet and metagraph ******\n')
+        else:
+            print('****** training tasknet (SD-LoRA Pure Mode) ******\n')
+
     heatmaps_dict = {}
     ### we assume 200 iterations as an epoch
     for _ in range(config.steps):
@@ -29,37 +35,57 @@ def train_p_s_an_epoch(config, base, loader, current_step, old_model, old_graph_
         if config.fp_16:
            imgs = imgs.half()
         loss = 0
+        
+        # Initialize helpers
+        protos = None
+        correlation = None
+
         ### forward
         if old_model is None:
             features, cls_score, feature_maps = base.model_dict['tasknet'](imgs, current_step)
-            protos, correlation = base.model_dict['metagraph'](features.detach())
-
-            feature_fuse = features + protos
+            
+            # [Fix 1] Check metagraph existence
+            if 'metagraph' in base.model_dict:
+                protos, correlation = base.model_dict['metagraph'](features.detach())
+                feature_fuse = features + protos
+            else:
+                feature_fuse = features # No graph, just features
+            
             plasticity_loss = config.weight_t * base.triplet_criterion(feature_fuse, feature_fuse, feature_fuse, local_pids, local_pids, local_pids)
 
-            meter.update({
-                'plasticity_loss': plasticity_loss.data,
-                # 'show_correlation_meta': correlation[0].data,
-                # 'show_correlation_transfered_meta': correlation[1].data,
-                'show_correlation_transfered_feature': correlation[2].data
-            })
+            # [Fix 2] Safe logging
+            meter_dict = {'plasticity_loss': plasticity_loss.data}
+            if correlation is not None:
+                meter_dict['show_correlation_transfered_feature'] = correlation[2].data
+            
+            meter.update(meter_dict)
             loss += plasticity_loss
             del feature_maps, feature_fuse, features, protos
         else:
             old_current_step = list(range(current_step))
             new_current_step = list(range(current_step + 1))
             features, cls_score_list, feature_maps = base.model_dict['tasknet'](imgs, new_current_step)
-            protos, correlation = base.model_dict['metagraph'](features.detach())
+            
+            # [Fix 1] Check metagraph existence
+            if 'metagraph' in base.model_dict:
+                protos, correlation = base.model_dict['metagraph'](features.detach())
+                feature_fuse = features + protos
+            else:
+                feature_fuse = features
 
-
-            feature_fuse = features + protos
             plasticity_loss = config.weight_t * base.triplet_criterion(feature_fuse, feature_fuse, feature_fuse,
                                                                     local_pids, local_pids, local_pids)
 
             cls_score = cls_score_list[-1]
+            
             with torch.no_grad():
                 old_features, old_cls_score_list, old_feature_maps = old_model(imgs, old_current_step)
-                old_vertex = old_graph_model.meta_graph_vertex
+                
+                # [Fix 3] Handle missing old_graph_model
+                old_vertex = None
+                if old_graph_model is not None:
+                    old_vertex = old_graph_model.meta_graph_vertex
+            
             del old_features, old_feature_maps
             torch.cuda.empty_cache()
             new_logit = torch.cat(cls_score_list, dim=1)
@@ -67,15 +93,21 @@ def train_p_s_an_epoch(config, base, loader, current_step, old_model, old_graph_
 
             knowladge_distilation_loss = config.weight_kd * base.loss_fn_kd(new_logit, old_logit, config.kd_T)
 
-            stability_loss = config.weight_r * base.model_dict['metagraph'].StabilityLoss(old_vertex, base.model_dict['metagraph'].meta_graph_vertex)
-            meter.update({
+            # [Fix 4] Stability Loss Protection
+            stability_loss = torch.tensor(0.0).to(base.device)
+            if 'metagraph' in base.model_dict and old_graph_model is not None:
+                stability_loss = config.weight_r * base.model_dict['metagraph'].StabilityLoss(old_vertex, base.model_dict['metagraph'].meta_graph_vertex)
+            
+            # [Fix 2] Safe logging
+            meter_dict = {
                 'Kd_loss': knowladge_distilation_loss.data,
                 'plasticity_loss': plasticity_loss.data,
                 'stability_loss': stability_loss.data,
-                # 'show_correlation_meta': correlation[0].data,
-                # 'show_correlation_transfered_meta': correlation[1].data,
-                'show_correlation_transfered_feature': correlation[2].data
-            })
+            }
+            if correlation is not None:
+                meter_dict['show_correlation_transfered_feature'] = correlation[2].data
+            meter.update(meter_dict)
+            
             loss += knowladge_distilation_loss + plasticity_loss + stability_loss
 
         ### loss
@@ -86,7 +118,11 @@ def train_p_s_an_epoch(config, base, loader, current_step, old_model, old_graph_
 
         ### optimize
         base.optimizer_dict['tasknet'].zero_grad()
-        base.optimizer_dict['metagraph'].zero_grad()
+        
+        # [Fix 5] Optimizer protection
+        if 'metagraph' in base.optimizer_dict:
+            base.optimizer_dict['metagraph'].zero_grad()
+            
         if config.fp_16:  # we use optimier to backward loss
             with base.amp.scale_loss(loss, base.optimizer_list) as scaled_loss:
                 scaled_loss.backward()
@@ -94,7 +130,11 @@ def train_p_s_an_epoch(config, base, loader, current_step, old_model, old_graph_
             loss.backward()
 
         base.optimizer_dict['tasknet'].step()
-        base.optimizer_dict['metagraph'].step()
+        
+        # [Fix 5] Optimizer protection
+        if 'metagraph' in base.optimizer_dict:
+            base.optimizer_dict['metagraph'].step()
+            
         ### recored
         meter.update({'ide_loss': ide_loss.data,
                       'acc': acc,
@@ -103,8 +143,12 @@ def train_p_s_an_epoch(config, base, loader, current_step, old_model, old_graph_
         _lr_scheduler_step = current_epoch
     else:
         _lr_scheduler_step = current_step * config.total_train_epochs + current_epoch
+    
     base.lr_scheduler_dict['tasknet'].step(_lr_scheduler_step)
-    base.lr_scheduler_dict['metagraph'].step(_lr_scheduler_step)
+    
+    # [Fix 6] Scheduler protection
+    if 'metagraph' in base.lr_scheduler_dict:
+        base.lr_scheduler_dict['metagraph'].step(_lr_scheduler_step)
 
     if output_featuremaps and not config.output_featuremaps_from_fixed:
         heatmaps_dict['feature_maps_true'] = base.featuremaps2heatmaps(imgs.detach().cpu(), feature_maps.detach().cpu(),
